@@ -6,6 +6,7 @@ from alibi_detect.base import BaseDetector, ThresholdMixin, outlier_prediction_d
 logger = logging.getLogger(__name__)
 
 EPSILON = 1e-8
+PADDING = ['constant', 'replicate', 'reflect']
 
 
 class SpectralResidual(BaseDetector, ThresholdMixin):
@@ -14,8 +15,11 @@ class SpectralResidual(BaseDetector, ThresholdMixin):
                  threshold: float = None,
                  window_amp: int = None,
                  window_local: int = None,
+                 padding_amp_method: str = 'replicate',
+                 padding_local_method: str = 'replicate',
                  n_est_points: int = None,
                  n_grad_points: int = 5,
+                 use_old: bool = False,
                  ) -> None:
         """
         Outlier detector for time-series data using the spectral residual algorithm.
@@ -30,11 +34,19 @@ class SpectralResidual(BaseDetector, ThresholdMixin):
             Window for the average log amplitude.
         window_local
             Window for the local average of the saliency map.
+        padding_amp_method
+            Padding method to be used prior to each convolution over amplitudes.
+            Possible values: `constant` | `replicate` | `reflect`. Default value: `replicate`
+        padding_local_method:
+            Padding method to be used prior to each convolution over amplitudes.
+            Possible values: `constant` | `replicate` | `reflect`. Default value: `replicate`
         n_est_points
             Number of estimated points padded to the end of the sequence.
         n_grad_points
             Number of points used for the gradient estimation of the additional points padded
             to the end of the sequence.
+        use_old:
+            Whether to use the old implementation.
         """
         super().__init__()
 
@@ -48,6 +60,9 @@ class SpectralResidual(BaseDetector, ThresholdMixin):
         self.conv_local = np.ones((1, window_local)).reshape(-1,) / window_local
         self.n_est_points = n_est_points
         self.n_grad_points = n_grad_points
+        self.padding_amp_method = padding_amp_method
+        self.padding_local_method = padding_local_method
+        self.use_old = use_old
 
         # set metadata
         self.meta['detector_type'] = 'online'
@@ -78,6 +93,62 @@ class SpectralResidual(BaseDetector, ThresholdMixin):
         # update threshold
         self.threshold = np.percentile(iscore, threshold_perc)
 
+    @staticmethod
+    def pad_same(X: np.ndarray, W: np.ndarray, method: str = "replicate"):
+        """
+        Adds padding to the signal `X` such that after applying a valid convolution with a kernel/filter
+        `w`, the resulting signal has the same shape as the input `X`.
+
+        Parameters
+        ----------
+        X:
+            Signal to be padded
+        W:
+            Convolution kernel/filter.
+        method:
+            Padding method to be used:
+             - `constant`: padding with constant `0`. Not recommended as it introduces a huge bias.
+             - `replicate`: repeats the last/extreme value.
+             - `reflect`: reflects the signal.
+
+        Returns
+        -------
+        Padded signal.
+        """
+        if method not in PADDING:
+            raise ValueError(f'Unknown padding method. Received {method}. Select one of the following: {PADDING}')
+
+        assert len(X.shape) == 1, "Only 1D signal supported."
+        assert len(W.shape) == 1, "Only 1D kernel/filter supported."
+        assert len(X.shape) >= len(W.shape), "The kernel/filter size should be less than the signal size."
+
+        pad_size = W.shape[0] - 1
+        pad_size_right = pad_size // 2
+        pad_size_left = pad_size - pad_size_right
+
+        # replicate padding
+        if method == 'replicate':
+            return np.concatenate([
+                np.tile(X[0], pad_size_left),
+                X,
+                np.tile(X[-1], pad_size_right)
+            ])
+
+        # reflection padding
+        if method == 'reflect':
+            return np.concatenate([
+                X[:pad_size_left][::-1],
+                X,
+                X[-pad_size_right:][::-1]
+            ])
+
+        # zero padding
+        return np.concatenate([
+            np.tile(0, pad_size_left),
+            X,
+            np.tile(0, pad_size_right)
+        ])
+
     def saliency_map(self, X: np.ndarray) -> np.ndarray:
         """
         Compute saliency map.
@@ -91,11 +162,52 @@ class SpectralResidual(BaseDetector, ThresholdMixin):
         -------
         Array with saliency map values.
         """
+        assert X.shape[0] > self.conv_amp.shape[0], "The length of the input signal should be greater " \
+                                                    "than the amplitude window"
+
         fft = np.fft.fft(X)
         amp = np.abs(fft)
         log_amp = np.log(amp)
         phase = np.angle(fft)
-        ma_log_amp = np.convolve(log_amp, self.conv_amp, 'same')
+
+        if not self.use_old:
+            # split spectrum into bias term and symmetric frequencies
+            bias, sym_freq = log_amp[:1], log_amp[1:]
+
+            # select just the first half of the sym_freq
+            freq = sym_freq[:(len(sym_freq) + 1) // 2]
+
+            # apply filter/moving average, but first pad the `freq` array
+            padded_freq = SpectralResidual.pad_same(X=freq, W=self.conv_amp, method=self.padding_amp_method)
+            ma_freq = np.convolve(padded_freq, self.conv_amp, 'valid')
+
+            # construct moving average log amplitude spectrum
+            ma_log_amp = np.concatenate([
+                bias,
+                ma_freq,
+                (ma_freq[:-1] if len(sym_freq) % 2 == 1 else ma_freq)[::-1]
+            ])
+            assert ma_log_amp.shape[0] == log_amp.shape[0], "`ma_log_amp` size does not match `log_amp` size."
+        else:
+            ma_log_amp = np.convolve(log_amp, self.conv_amp, 'same')
+
+        # import matplotlib.pyplot as plt
+        # plt.plot(np.real(np.fft.ifft(np.exp(log_amp + 1j * phase))))
+        # plt.plot(np.real(np.fft.ifft(np.exp(ma_log_amp + 1j * phase))))
+        # plt.title("Old" if use_old else "New")
+        # plt.show()
+
+        # Old
+        # offset 0: F1 score: 0.8066298342541436 -- Accuracy: 0.965 -- Recall: 0.73
+        # offset 10:  F1 score: 0.4105960264900662 -- Accuracy: 0.733 -- Recall: 0.93
+        # offset 100: F1 score: 0.37759336099585067 -- Accuracy: 0.7 -- Recall: 0.91
+
+        # New
+        # offset 0: F1 score: 0.78 -- Accuracy: 0.956 -- Recall: 0.78
+        # offset 10: F1 score: 0.7100000000000001 -- Accuracy: 0.942 -- Recall: 0.71
+        # offset 100: F1 score: 0.74 -- Accuracy: 0.948 -- Recall: 0.74
+
+        # compute residual spectrum and transform back to time domain
         res_amp = log_amp - ma_log_amp
         sr = np.abs(np.fft.ifft(np.exp(res_amp + 1j * phase)))
         return sr
@@ -170,7 +282,18 @@ class SpectralResidual(BaseDetector, ThresholdMixin):
         X_pad = self.add_est_points(X, t)  # add padding
         sr = self.saliency_map(X_pad)  # compute saliency map
         sr = sr[:-self.n_est_points]  # remove padding again
-        ma_sr = np.convolve(sr, self.conv_local, 'same')
+
+        # pad the spectral residual before convolving. By applying `replicate` or `reflect` padding we can
+        # remove some of the bias/outliers introduced at the beginning of the saliency map by a naive zero padding
+        # performed by numpy
+        if not self.use_old:
+            padded_sr = SpectralResidual.pad_same(X=sr, W=self.conv_local, method=self.padding_local_method)
+            ma_sr = np.convolve(padded_sr, self.conv_local, 'valid')
+            assert sr.shape[0] == ma_sr.shape[0], "`ma_sr` size does not match `sr` size."
+        else:
+            ma_sr = np.convolve(sr, self.conv_local, 'same')
+
+        # compute the outlier score
         iscore = (sr - ma_sr) / (ma_sr + EPSILON)
         return iscore
 
