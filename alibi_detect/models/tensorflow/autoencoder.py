@@ -118,7 +118,8 @@ class VAE(tf.keras.Model):
         z_mean, z_log_var, z = self.encoder(x)
         x_recon = self.decoder(z)
         # add KL divergence loss term
-        kl_loss = -.5 * tf.reduce_mean(z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1)
+        kl_loss = -.5 * (z_log_var - tf.square(z_mean) - tf.exp(z_log_var) + 1)
+        kl_loss = tf.reduce_mean(tf.reduce_sum(kl_loss, axis=1))
         self.add_loss(self.beta * kl_loss)
         return x_recon
 
