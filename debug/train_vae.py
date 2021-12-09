@@ -33,25 +33,25 @@ def get_kddcup(random_state: int = 0):
     # fetch only load 10% of the dataset
     kddcup = fetch_kdd(percent10=True, random_state=random_state)
 
-    data_train, data_test, target_train, target_test = train_test_split(kddcup.data,
-                                                                        kddcup.target,
-                                                                        test_size=0.5,
-                                                                        random_state=random_state)
+    data_train, data_outlier, target_train, target_outlier = train_test_split(kddcup.data,
+                                                                              kddcup.target,
+                                                                              test_size=0.5,
+                                                                              random_state=random_state)
 
-    data_test, data_threshold, target_test, target_threshold = train_test_split(data_test,
-                                                                                target_test,
-                                                                                test_size=0.5,
-                                                                                random_state=random_state)
+    data_outlier, data_threshold, target_outlier, target_threshold = train_test_split(data_outlier,
+                                                                                      target_outlier,
+                                                                                      test_size=0.5,
+                                                                                      random_state=random_state)
 
     kddcup_train = {'data': data_train, 'target': target_train, 'feature_names': kddcup.feature_names}
-    kddcup_test = {'data': data_test, 'target': target_test, 'feature_names': kddcup.feature_names}
+    kddcup_outlier = {'data': data_outlier, 'target': target_outlier, 'feature_names': kddcup.feature_names}
     kddcup_threshold = {'data': data_threshold, 'target': target_threshold, 'feature_names': kddcup.feature_names}
-    return kddcup_train, kddcup_test, kddcup_threshold
+    return kddcup_train, kddcup_outlier, kddcup_threshold
 
 
 def get_dataset(args, perc_outlier_threshold: int = 5, perc_outlier: int = 10):
     # fetch only load 10% of the dataset
-    kddcup_train, kddcup_outlier, kddcup_threshold = get_kddcup(random_state=0)
+    kddcup_train, kddcup_outlier, kddcup_threshold = get_kddcup(random_state=args.random_state)
 
     # sample training dataset
     normal_batch = create_outlier_batch(kddcup_train['data'],
@@ -67,7 +67,8 @@ def get_dataset(args, perc_outlier_threshold: int = 5, perc_outlier: int = 10):
     threshold_batch = create_outlier_batch(kddcup_threshold['data'],
                                            kddcup_threshold['target'],
                                            n_samples=1000,
-                                           perc_outlier=perc_outlier_threshold)
+                                           perc_outlier=perc_outlier_threshold,
+                                           random_state=args.random_state)
     X_threshold, y_threshold = threshold_batch.data.astype('float'), threshold_batch.target
     X_threshold = (X_threshold - mean) / stdev
 
@@ -75,7 +76,8 @@ def get_dataset(args, perc_outlier_threshold: int = 5, perc_outlier: int = 10):
     outlier_batch = create_outlier_batch(kddcup_outlier['data'],
                                          kddcup_outlier['target'],
                                          n_samples=1000,
-                                         perc_outlier=perc_outlier)
+                                         perc_outlier=perc_outlier,
+                                         random_state=args.random_state)
     X_outlier, y_outlier = outlier_batch.data.astype('float'), outlier_batch.target
     X_outlier = (X_outlier - mean) / stdev
 

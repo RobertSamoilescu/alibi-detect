@@ -63,7 +63,7 @@ def create_outlier_batch(data: np.ndarray,
     batch_outlier = sample_df(outlier, n_outlier, random_state=random_state)
 
     batch = pd.concat([batch_normal, batch_outlier])
-    batch = batch.sample(frac=1).reset_index(drop=True)
+    batch = batch.sample(frac=1, random_state=random_state).reset_index(drop=True)
 
     is_outlier = batch['target'].values
     batch.drop(columns=['target'], inplace=True)
