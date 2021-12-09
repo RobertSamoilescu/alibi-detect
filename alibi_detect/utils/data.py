@@ -26,19 +26,21 @@ class Bunch(dict):
 
 
 def sample_df(df: pd.DataFrame,
-              n: int):
+              n: int,
+              random_state: int = 0):
     """ Sample n instances from the dataframe df. """
     if n < df.shape[0]+1:
         replace = False
     else:
         replace = True
-    return df.sample(n=n, replace=replace)
+    return df.sample(n=n, replace=replace, random_state=random_state)
 
 
 def create_outlier_batch(data: np.ndarray,
                          target: np.ndarray,
                          n_samples: int,
-                         perc_outlier: int) -> Union[Bunch, Tuple[np.ndarray, np.ndarray]]:
+                         perc_outlier: int,
+                         random_state: int = 0) -> Union[Bunch, Tuple[np.ndarray, np.ndarray]]:
     """ Create a batch with a defined percentage of outliers. """
 
     # create df
@@ -57,8 +59,8 @@ def create_outlier_batch(data: np.ndarray,
         n_normal = int((100 - perc_outlier) * .01 * n_samples)
 
     # draw samples
-    batch_normal = sample_df(normal, n_normal)
-    batch_outlier = sample_df(outlier, n_outlier)
+    batch_normal = sample_df(normal, n_normal, random_state=random_state)
+    batch_outlier = sample_df(outlier, n_outlier, random_state=random_state)
 
     batch = pd.concat([batch_normal, batch_outlier])
     batch = batch.sample(frac=1).reset_index(drop=True)
