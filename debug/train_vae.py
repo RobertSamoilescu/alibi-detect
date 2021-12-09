@@ -31,7 +31,7 @@ def get_arguments():
 
 def get_kddcup(random_state: int = 0):
     # fetch only load 10% of the dataset
-    kddcup = fetch_kdd(percent10=True)
+    kddcup = fetch_kdd(percent10=True, random_state=random_state)
 
     data_train, data_test, target_train, target_test = train_test_split(kddcup.data,
                                                                         kddcup.target,

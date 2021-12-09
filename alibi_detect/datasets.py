@@ -31,7 +31,8 @@ def fetch_kdd(target: list = ['dos', 'r2l', 'u2r', 'probe'],
                                  'dst_host_srv_serror_rate', 'dst_host_rerror_rate',
                                  'dst_host_srv_rerror_rate'],
               percent10: bool = True,
-              return_X_y: bool = False) -> Union[Bunch, Tuple[np.ndarray, np.ndarray]]:
+              return_X_y: bool = False,
+              random_state: int = 0) -> Union[Bunch, Tuple[np.ndarray, np.ndarray]]:
     """
     KDD Cup '99 dataset. Detect computer network intrusions.
 
@@ -55,7 +56,7 @@ def fetch_kdd(target: list = ['dos', 'r2l', 'u2r', 'probe'],
     """
 
     # fetch raw data
-    data_raw = fetch_kddcup99(subset=None, data_home=None, percent10=percent10)
+    data_raw = fetch_kddcup99(subset=None, data_home=None, percent10=percent10, random_state=random_state)
 
     # specify columns
     cols = ['duration', 'protocol_type', 'service', 'flag', 'src_bytes', 'dst_bytes',
