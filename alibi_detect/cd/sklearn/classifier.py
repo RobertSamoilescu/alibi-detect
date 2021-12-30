@@ -4,6 +4,7 @@ from functools import partial
 from typing import Callable, Dict, Optional, Tuple
 from sklearn.base import clone, ClassifierMixin
 from sklearn.calibration import CalibratedClassifierCV
+from sklearn.ensemble import RandomForestClassifier
 from alibi_detect.cd.base import BaseClassifierDrift
 
 logger = logging.getLogger(__name__)
@@ -26,6 +27,7 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
             seed: int = 0,
             use_calibration: bool = False,
             calibration_kwargs: Optional[dict] = None,
+            use_oob: bool = False,
             data_type: Optional[str] = None,
     ) -> None:
         """
@@ -73,6 +75,8 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
             Optional additional kwargs for calibration.
             See https://scikit-learn.org/stable/modules/generated/sklearn.calibration.CalibratedClassifierCV.html
             for more details.
+        use_oob
+            Whether to use oob predictions. Supported only for RandomForestClassifier.
         data_type
             Optionally specify the data type (tabular, image or time-series). Added to metadata.
         """
@@ -98,6 +102,7 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
         self.original_model = model
         self.use_calibration = use_calibration
         self.calibration_kwargs = dict() if calibration_kwargs is None else calibration_kwargs
+        self.use_oob = use_oob
         self.model = self._clone_model()
 
     def _clone_model(self):
@@ -106,6 +111,7 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
         # equivalence between `retrain_from_scratch` and `warm_start`
         if not self.retrain_from_scratch:
             if hasattr(model, 'warm_start'):
+                model.warm_start = True
                 logger.warning('`retrain_from_scratch=False` sets automatically the parameter `warm_start=True` '
                                'for the given classifier. Please consult the documentation to ensure that the '
                                '`warm_start=True` is applicable in the current context (i.e., for tree-based '
@@ -113,15 +119,34 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
                                'fit function expects the same dataset and an update/increase in the number of '
                                'estimators - previous fitted estimators will be kept frozen while the new ones '
                                'will be fitted).')
-                model.warm_start = True
             else:
                 logger.warning('Current classifier does not support `warm_start`. The model will be retrained '
                                'from scratch every iteration.')
         else:
             if hasattr(model, 'warm_start'):
-                logger.warning('`retrain_from_scratch=True` sets automatically the parameter `warm_start=False`.')
                 model.warm_start = False
+                logger.warning('`retrain_from_scratch=True` sets automatically the parameter `warm_start=False`.')
 
+        # oob checks
+        if self.use_oob:
+            if not isinstance(model, RandomForestClassifier):
+                raise ValueError(f'Oob supported only for RandomForestClassifier. '
+                                 f'Received a model of type {model.__class__.__name__}')
+
+            if self.use_calibration:
+                self.use_calibration = False
+                logger.warning('Calibration cannot be user when `use_oob=True`. Setting `use_calibration=False`.')
+
+            model.oob_score = True
+            model.bootstrap = True
+            logger.warning('`use_oob=True` sets automatically the parameter `boostrap=True` and `oob_score=True`.')
+            logger.warning('`train_size` and `n_folds` are ignored when `use_oob=True`.')
+        else:
+            if isinstance(model, RandomForestClassifier):
+                model.oob_score = False
+                logger.warning('`use_oob=False` sets automatically the parameter `oob_score=False`')
+
+        # preds_type checks
         if self.preds_type == 'probs':
             # calibrate the model if user specified.
             if self.use_calibration:
@@ -186,6 +211,12 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
         and the out-of-fold classifier model prediction probabilities on the reference and test data
 
         """
+        if self.use_oob and isinstance(self.model, RandomForestClassifier):
+            return self._score_rf(x)
+
+        return self._score(x)
+
+    def _score(self, x: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray]:
         x_ref, x = self.preprocess(x)
         n_ref, n_cur = len(x_ref), len(x)
         x, y, splits = self.get_splits(x_ref, x)
@@ -202,7 +233,6 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
             else:
                 raise TypeError(f'x needs to be of type np.ndarray or list and not {type(x)}.')
 
-            # fit the model and compute probabilities
             self.model.fit(x_tr, y_tr)
             probs = self.model.predict_proba(x_te)
             probs_oof_list.append(probs)
@@ -214,3 +244,19 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
         p_val, dist = self.test_probs(y_oof, probs_oof, n_ref, n_cur)
         probs_sort = probs_oof[np.argsort(idx_oof)]
         return p_val, dist, probs_sort[:n_ref, 1], probs_sort[n_ref:, 1]
+
+    def _score_rf(self, x: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray]:
+        x_ref, x = self.preprocess(x)
+        x, y, _ = self.get_splits(x_ref, x, return_splits=False)
+        self.model.fit(x, y)
+        # it is possible that some inputs do not have OOB scores. This is probably means that too few trees were
+        # used to compute any reliable estimates.
+        # TODO: Shall we raise an error or keep going by selecting only not NaN?
+        index_oob = np.where(np.all(~np.isnan(self.model.oob_decision_function_), axis=1))[0]
+        probs_oob = self.model.oob_decision_function_[index_oob]
+        y_oob = y[index_oob]
+        # comparison due to ordering in get_split (i.e, x = [x_ref, x])
+        n_ref = np.sum(index_oob < len(x_ref)).item()
+        n_cur = np.sum(index_oob >= len(x_ref)).item()
+        p_val, dist = self.test_probs(y_oob, probs_oob, n_ref, n_cur)
+        return p_val, dist, probs_oob[:n_ref, 1], probs_oob[n_ref:, 1]

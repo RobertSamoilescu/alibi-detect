@@ -127,8 +127,11 @@ class BaseClassifierDrift(BaseDetector):
         else:
             return self.x_ref, x
 
-    def get_splits(self, x_ref: Union[np.ndarray, list], x: Union[np.ndarray, list]) \
-            -> Tuple[Union[np.ndarray, list], np.ndarray, List[Tuple[np.ndarray, np.ndarray]]]:
+    def get_splits(self,
+                   x_ref: Union[np.ndarray, list],
+                   x: Union[np.ndarray, list],
+                   return_splits: bool = True) \
+            -> Tuple[Union[np.ndarray, list], np.ndarray, Optional[List[Tuple[np.ndarray, np.ndarray]]]]:
         """
         Split reference and test data in train and test folds used by the classifier.
 
@@ -138,6 +141,8 @@ class BaseClassifierDrift(BaseDetector):
             Data used as reference distribution.
         x
             Batch of instances.
+        return_splits
+            Whether to return the splits.
 
         Returns
         -------
@@ -150,6 +155,9 @@ class BaseClassifierDrift(BaseDetector):
             x = np.concatenate([x_ref, x], axis=0)
         else:  # add 2 lists
             x = x_ref + x
+
+        if not return_splits:
+            return x, y, None
 
         # random shuffle if stratified folds are not used
         n_tot = len(x)
@@ -178,7 +186,7 @@ class BaseClassifierDrift(BaseDetector):
         n_ref
             Size of reference window used in training model
         n_cur
-            Size of current window used in trianing model
+            Size of current window used in training model
 
         Returns
         -------
