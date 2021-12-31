@@ -1,6 +1,6 @@
 import numpy as np
 from typing import Callable, Dict, Optional, Union
-from alibi_detect.utils.frameworks import has_pytorch, has_tensorflow, has_sklearn
+from alibi_detect.utils.frameworks import has_pytorch, has_tensorflow, has_sklearn, has_alibi
 
 if has_sklearn:
     from sklearn.base import ClassifierMixin
@@ -14,6 +14,9 @@ if has_pytorch:
 if has_tensorflow:
     from alibi_detect.cd.tensorflow.classifier import ClassifierDriftTF
     from alibi_detect.utils.tensorflow.data import TFDataset
+
+if has_alibi:
+    from alibi.explainers import KernelShap, TreeShap
 
 
 class ClassifierDrift:
@@ -46,7 +49,10 @@ class ClassifierDrift:
             use_calibration: bool = False,
             calibration_kwargs: Optional[dict] = None,
             use_oob: bool = False,
-            data_type: Optional[str] = None
+            use_shap: bool = False,
+            shap_kwargs: Optional[dict] = None,
+            data_type: Optional[str] = None,
+            model_type: Optional[str] = None
     ) -> None:
         """
         Classifier-based drift detector. The classifier is trained on a fraction of the combined
@@ -128,8 +134,16 @@ class ClassifierDrift:
         use_oob
             Whether to use oob predictions. Only relevant for 'sklearn' backend. Supported only for
             RandomForestClassifier.
+        use_shap
+            Whether to use 'alibi' Shap explainer. Only relevant for 'sklearn' backend.
+        shap_kwargs
+            Kwargs for 'alibi' Shap explainer `fit` parameters. Only relevant for 'sklearn' backend.
         data_type
             Optionally specify the data type (tabular, image or time-series). Added to metadata.
+        model_type
+            Optionally specify the model type (tree-based). Added to metadata and used to chose the appropriate
+            Shap explainer (i.e., if tree-based then TreeShap will be used for explanations). Only relevant for
+            'sklearn' models.
         """
         super().__init__()
 
@@ -149,13 +163,14 @@ class ClassifierDrift:
         [kwargs.pop(k, None) for k in pop_kwargs]
 
         if backend == 'tensorflow':
-            pop_kwargs = ['device', 'dataloader', 'use_calibration', 'calibration_kwargs', 'use_oob']
+            pop_kwargs = ['device', 'dataloader', 'use_calibration', 'calibration_kwargs', 'use_oob',
+                          'use_shap', 'shap_kwargs', 'model_type']
             [kwargs.pop(k, None) for k in pop_kwargs]
             if dataset is None:
                 kwargs.update({'dataset': TFDataset})
             self._detector = ClassifierDriftTF(*args, **kwargs)  # type: ignore
         elif backend == 'pytorch':
-            pop_kwargs = ['use_calibration', 'calibration_kwargs', 'use_oob']
+            pop_kwargs = ['use_calibration', 'calibration_kwargs', 'use_oob', 'use_shap', 'shap_kwargs', 'model_type']
             [kwargs.pop(k, None) for k in pop_kwargs]
             if dataset is None:
                 kwargs.update({'dataset': TorchDataset})

@@ -108,6 +108,7 @@ class BaseClassifierDrift(BaseDetector):
         self.meta['detector_type'] = 'offline'
         self.meta['data_type'] = data_type
         self.meta['params'] = {'binarize_preds ': binarize_preds, 'preds_type': preds_type}
+        self.meta['seed' ] = seed
 
     def preprocess(self, x: Union[np.ndarray, list]) -> Tuple[Union[np.ndarray, list], Union[np.ndarray, list]]:
         """

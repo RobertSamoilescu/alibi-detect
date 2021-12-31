@@ -1,11 +1,15 @@
 import logging
 import numpy as np
 from functools import partial
-from typing import Callable, Dict, Optional, Tuple
+from typing import Callable, Dict, Optional, Tuple, List
 from sklearn.base import clone, ClassifierMixin
 from sklearn.calibration import CalibratedClassifierCV
 from sklearn.ensemble import RandomForestClassifier
 from alibi_detect.cd.base import BaseClassifierDrift
+from alibi_detect.utils.frameworks import has_alibi
+
+if has_alibi:
+    from alibi.explainers import KernelShap, TreeShap
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +32,10 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
             use_calibration: bool = False,
             calibration_kwargs: Optional[dict] = None,
             use_oob: bool = False,
+            use_shap: bool = False,
+            shap_kwargs: Optional[dict] = None,
             data_type: Optional[str] = None,
+            model_type: Optional[str] = None,
     ) -> None:
         """
         Classifier-based drift detector. The classifier is trained on a fraction of the combined
@@ -77,8 +84,15 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
             for more details.
         use_oob
             Whether to use oob predictions. Supported only for RandomForestClassifier.
+        use_shap
+            Whether to use 'alibi' Shap explainer.
+        shap_kwargs
+            Kwargs for 'alibi' Shap explainer `fit` parameters. Only relevant for 'sklearn' backend.
         data_type
             Optionally specify the data type (tabular, image or time-series). Added to metadata.
+        model_type
+            Optionally specify the model type (tree-based). Added to metadata and used to chose the appropriate
+            Shap explainer (i.e., if tree-based then TreeShap will be used for explanations).
         """
         super().__init__(
             x_ref=x_ref,
@@ -92,18 +106,74 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
             n_folds=n_folds,
             retrain_from_scratch=retrain_from_scratch,
             seed=seed,
-            data_type=data_type
+            data_type=data_type,
         )
+
+        if use_shap and preprocess_x_ref:
+            self.x_ref_orig = x_ref  # x_ref can be preprocessed in the __init__ of the base class
 
         if preds_type not in ['probs', 'scores']:
             raise ValueError("'preds_type' should be 'probs' or 'scores'")
 
         self.meta.update({'backend': 'sklearn'})
         self.original_model = model
+
+        # calibration
         self.use_calibration = use_calibration
-        self.calibration_kwargs = dict() if calibration_kwargs is None else calibration_kwargs
+        self.calibration_kwargs = dict() if (calibration_kwargs is None) else calibration_kwargs
+
+        # random forest oob flag
         self.use_oob = use_oob
+
+        # shap explainer params
+        self.use_shap = use_shap
+        self.shap_kwargs = shap_kwargs if (shap_kwargs is not None) else dict()
+        self.model_type = model_type
+
+        # clone the original model and define explainer
         self.model = self._clone_model()
+
+    def _create_explainer(self):
+        if not self.use_shap:
+            return None
+
+        # use TreeShap
+        if self.model_type == 'tree-based':
+            # TODO: check the following statement
+            # Can we do the same trick as in KernelShap by passing the raw dataset and modify the predict
+            # function to apply the preprocessing internally?
+            # This would be helpful when dealing with one-hot encodings, since we can aggregate all the values
+            # for a categorical feature for free (see example in alibi) (i.e. no need for regrouping).
+            # I believe that this might not possible since TreeShap needs the structure of the trees which are built
+            # for preprocessed data. One should look into how the tree traversing is implemented for each instance
+            # and check if there is a possibility to preprocess the data instance right before the tree traversing.
+            # For now just throw an erro
+            if isinstance(self.preprocess_fn, Callable):
+                raise ValueError("`model_type='tree-based' cannot be used for ad-hoc data preprocessing. "
+                                 "Preprocess the data before and set `preprocess_fn=None`.'")
+
+            return TreeShap(predictor=self.model,
+                            model_output=self.shap_kwargs.get('model_output', 'raw'),
+                            feature_names=self.shap_kwargs.get('feature_names', None),
+                            categorical_names=self.shap_kwargs.get('categorical_names', None),
+                            task='classification',
+                            seed=self.meta['seed'])
+
+        # otherwise use KernelShap
+        if self.preds_type == 'probs':
+            predictor = (lambda x: self.model.predict_proba(self.preprocess_fn(x))) \
+                if isinstance(self.preprocess_fn, Callable) else self.model.predict_proba
+        else:
+            predictor = (lambda x: self.model.decision_function(self.preprocess_fn(x))) \
+                if isinstance(self.preprocess_fn, Callable) else self.model.decision_function
+
+        return KernelShap(predictor=predictor,
+                          link=self.shap_kwargs.get('link', 'identity'),
+                          feature_names=self.shap_kwargs.get('feature_names', None),
+                          categorical_names=self.shap_kwargs.get('categorical_names', None),
+                          task='classification',
+                          seed=self.meta['seed'],
+                          distributed_opts=self.shap_kwargs.get('distributed_opts', None))
 
     def _clone_model(self):
         model = clone(self.original_model)
@@ -130,8 +200,12 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
         # oob checks
         if self.use_oob:
             if not isinstance(model, RandomForestClassifier):
-                raise ValueError(f'Oob supported only for RandomForestClassifier. '
+                raise ValueError(f'OOB supported only for RandomForestClassifier. '
                                  f'Received a model of type {model.__class__.__name__}')
+
+            if self.use_shap:
+                self.use_shap = False
+                logger.warning('`use_shap=True` cannot be used when `use_oob=True`. Setting `use_shap=False`.')
 
             if self.use_calibration:
                 self.use_calibration = False
@@ -152,6 +226,11 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
             if self.use_calibration:
                 logger.warning('Using calibration to obtain the prediction probabilities.')
                 model = CalibratedClassifierCV(base_estimator=model, **self.calibration_kwargs)
+
+            # check if shap can be used
+            if self.use_shap and (not hasattr(model, 'predict_proba')):
+                raise ValueError("Shap explainer cannot be used when `preds_type='probs'` and the classifier "
+                                 "does not support `predict_proba`.")
 
             # if the binarize_preds=True, we don't really need the probabilities as in test_probs will be rounded
             # to the closest integer (i.e., to 0 or 1) according to the predicted probability. Thus, we can define
@@ -216,13 +295,43 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
 
         return self._score(x)
 
+    def _compute_shap(self, x_tr: np.ndarray, x_te: np.ndarray) -> np.ndarray:
+        # create shap exaplainer
+        # TODO: move this into constructor?
+        shap_explainer = self._create_explainer()
+
+        # fit shap explainer
+        shap_fit_kwargs = {'background_data': x_tr}
+        shap_fit_kwargs.update(self.shap_kwargs)  # this allows background data to be overwritten by None
+        shap_explainer.fit(**shap_fit_kwargs)
+
+        # explain test instances
+        shap_explain_kwargs = {'X': x_te}
+        shap_explain_kwargs.update(self.shap_kwargs)  # allow to pass some other argument to the `explain` method
+        return shap_explainer.explain(**shap_explain_kwargs).shap_values[0]
+
+    def _agregate_shap(self, shap_oof_list: List[np.ndarray]) -> np.ndarray:
+        if len(shap_oof_list) == 0:
+            return np.array([])
+
+        shap_oof = np.concatenate(shap_oof_list, axis=0)
+        shap_oof = np.mean(np.abs(shap_oof), axis=0)
+        return shap_oof
+
     def _score(self, x: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray]:
+        # data used for shap explanation. note that is raw data (not preprocessed)
+        if self.use_shap:
+            x_ref_shap = self.x_ref_orig if hasattr(self, 'x_ref_orig') else self.x_ref
+            x_shap = np.concatenate([x_ref_shap, x])
+
         x_ref, x = self.preprocess(x)
         n_ref, n_cur = len(x_ref), len(x)
         x, y, splits = self.get_splits(x_ref, x)
 
         # iterate over folds: train a new model for each fold and make out-of-fold (oof) predictions
         probs_oof_list, idx_oof_list = [], []
+        shap_oof_list = []
+
         for idx_tr, idx_te in splits:
             y_tr = y[idx_tr]
 
@@ -233,28 +342,48 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
             else:
                 raise TypeError(f'x needs to be of type np.ndarray or list and not {type(x)}.')
 
+            # fit the model and extract probs
             self.model.fit(x_tr, y_tr)
             probs = self.model.predict_proba(x_te)
             probs_oof_list.append(probs)
             idx_oof_list.append(idx_te)
 
+            # explain the model
+            if self.use_shap:
+                shap_oof_list.append(self._compute_shap(x_tr=x_shap[idx_tr], x_te=x_shap[idx_te]))
+
+        # concatenate oof probs and indices
         probs_oof = np.concatenate(probs_oof_list, axis=0)
         idx_oof = np.concatenate(idx_oof_list, axis=0)
+
+        # extract oof corresponding outputs
         y_oof = y[idx_oof]
+
+        # compute p-values and distance
         p_val, dist = self.test_probs(y_oof, probs_oof, n_ref, n_cur)
+
+        # sort the oof probs to correspond to ref and curr
         probs_sort = probs_oof[np.argsort(idx_oof)]
+
+        # compute global shap explanation
+        # TODO: store for now internally, but need to find a way to return themq
+        if self.use_shap:
+            self.shap_oof = self._agregate_shap(shap_oof_list)
+
         return p_val, dist, probs_sort[:n_ref, 1], probs_sort[n_ref:, 1]
 
     def _score_rf(self, x: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray]:
         x_ref, x = self.preprocess(x)
         x, y, _ = self.get_splits(x_ref, x, return_splits=False)
         self.model.fit(x, y)
+
         # it is possible that some inputs do not have OOB scores. This is probably means that too few trees were
         # used to compute any reliable estimates.
         # TODO: Shall we raise an error or keep going by selecting only not NaN?
         index_oob = np.where(np.all(~np.isnan(self.model.oob_decision_function_), axis=1))[0]
         probs_oob = self.model.oob_decision_function_[index_oob]
         y_oob = y[index_oob]
+
         # comparison due to ordering in get_split (i.e, x = [x_ref, x])
         n_ref = np.sum(index_oob < len(x_ref)).item()
         n_cur = np.sum(index_oob >= len(x_ref)).item()

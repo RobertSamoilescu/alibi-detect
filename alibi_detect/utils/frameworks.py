@@ -15,3 +15,10 @@ try:
     has_sklearn = True
 except ImportError:
     has_sklearn = False
+
+
+try:
+    import alibi
+    has_alibi = True
+except ImportError:
+    has_alibi = False
