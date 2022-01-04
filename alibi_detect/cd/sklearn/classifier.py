@@ -305,6 +305,10 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
         shap_fit_kwargs.update(self.shap_kwargs)  # this allows background data to be overwritten by None
         shap_explainer.fit(**shap_fit_kwargs)
 
+        # select test data
+        n_samples = shap_fit_kwargs.get('n_samples', x_te.shape[0])
+        x_te = x_te[:n_samples]
+
         # explain test instances
         shap_explain_kwargs = {'X': x_te}
         shap_explain_kwargs.update(self.shap_kwargs)  # allow to pass some other argument to the `explain` method
@@ -318,7 +322,7 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
         shap_oof = np.mean(np.abs(shap_oof), axis=0)
         return shap_oof
 
-    def _score(self, x: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray]:
+    def _score(self, x: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray, Optional[np.ndarray]]:
         # data used for shap explanation. note that is raw data (not preprocessed)
         if self.use_shap:
             x_ref_shap = self.x_ref_orig if hasattr(self, 'x_ref_orig') else self.x_ref
@@ -366,11 +370,8 @@ class ClassifierDriftSklearn(BaseClassifierDrift):
         probs_sort = probs_oof[np.argsort(idx_oof)]
 
         # compute global shap explanation
-        # TODO: store for now internally, but need to find a way to return themq
-        if self.use_shap:
-            self.shap_oof = self._agregate_shap(shap_oof_list)
-
-        return p_val, dist, probs_sort[:n_ref, 1], probs_sort[n_ref:, 1]
+        shap_oof = self._agregate_shap(shap_oof_list) if self.use_shap else None
+        return p_val, dist, probs_sort[:n_ref, 1], probs_sort[n_ref:, 1], shap_oof
 
     def _score_rf(self, x: np.ndarray) -> Tuple[float, float, np.ndarray, np.ndarray]:
         x_ref, x = self.preprocess(x)

@@ -213,12 +213,16 @@ class BaseClassifierDrift(BaseDetector):
         return p_val, dist
 
     @abstractmethod
-    def score(self, x: Union[np.ndarray, list]) -> Tuple[float, float, np.ndarray, np.ndarray]:
+    def score(self, x: Union[np.ndarray, list]) -> Tuple[float, float, np.ndarray, np.ndarray, Optional[np.ndarray]]:
         pass
 
-    def predict(self, x: Union[np.ndarray, list],  return_p_val: bool = True,
-                return_distance: bool = True, return_probs: bool = True, return_model: bool = True) \
-            -> Dict[str, Dict[str, Union[str, int, float, Callable]]]:
+    def predict(self,
+                x: Union[np.ndarray, list],
+                return_p_val: bool = True,
+                return_distance: bool = True,
+                return_probs: bool = True,
+                return_shap: bool = True,
+                return_model: bool = True) -> Dict[str, Dict[str, Optional[Union[str, int, float, Callable]]]]:
         """
         Predict whether a batch of data has drifted from the reference data.
 
@@ -234,6 +238,8 @@ class BaseClassifierDrift(BaseDetector):
         return_probs
             Whether to return the instance level classifier probabilities for the reference and test data
             (0=reference data, 1=test data).
+        return_shap
+            Whether to return the shap global explanations.
         return_model
             Whether to return the updated model trained to discriminate reference and test instances.
 
@@ -246,7 +252,7 @@ class BaseClassifierDrift(BaseDetector):
         prediction probabilities on the reference and test data, and the trained model.
         """
         # compute drift scores
-        p_val, dist, probs_ref, probs_test = self.score(x)
+        p_val, dist, probs_ref, probs_test, shap = self.score(x)
         drift_pred = int(p_val < self.p_val)
 
         # update reference dataset
@@ -268,6 +274,8 @@ class BaseClassifierDrift(BaseDetector):
         if return_probs:
             cd['data']['probs_ref'] = probs_ref
             cd['data']['probs_test'] = probs_test
+        if return_shap:
+            cd['data']['shap'] = shap
         if return_model:
             cd['data']['model'] = self.model  # type: ignore
         return cd
