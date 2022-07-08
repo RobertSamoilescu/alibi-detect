@@ -50,7 +50,9 @@ def loss_aegmm(x_true: tf.Tensor,
                z: tf.Tensor,
                gamma: tf.Tensor,
                w_energy: float = .1,
-               w_cov_diag: float = .005
+               w_cov_diag: float = .005,
+               recon_features_len: int = 2,
+               cholesky_eps: float = 1e-4,
                ) -> tf.Tensor:
     """
     Loss function used for OutlierAEGMM.
@@ -74,9 +76,12 @@ def loss_aegmm(x_true: tf.Tensor,
     -------
     Loss value.
     """
-    recon_loss = tf.reduce_mean((x_true - x_pred) ** 2)
-    phi, mu, cov, L, log_det_cov = gmm_params(z, gamma)
-    sample_energy, cov_diag = gmm_energy(z, phi, mu, cov, L, log_det_cov, return_mean=True)
+    recon_loss = tf.reduce_sum((x_true - x_pred) ** 2) / x_true.shape[0] # tf.reduce_mean((x_true - x_pred) ** 2)
+    phi, mu, cov, L, log_det_cov = gmm_params(z=z, gamma=gamma, eps=cholesky_eps)
+    sample_energy, cov_diag = gmm_energy(z=z, phi=phi, mu=mu, cov=cov,
+                                         L=L, log_det_cov=log_det_cov,
+                                         recon_features_len=recon_features_len,
+                                         return_mean=True)
     loss = recon_loss + w_energy * sample_energy + w_cov_diag * cov_diag
     return loss
 

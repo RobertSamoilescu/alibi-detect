@@ -4,7 +4,8 @@ from typing import Tuple
 
 
 def gmm_params(z: tf.Tensor,
-               gamma: tf.Tensor) \
+               gamma: tf.Tensor,
+               eps: float = 1e-4) \
         -> Tuple[tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor, tf.Tensor]:
     """
     Compute parameters of Gaussian Mixture Model.
@@ -42,7 +43,6 @@ def gmm_params(z: tf.Tensor,
 
     # cholesky decomposition of covariance and determinant derivation
     D = tf.shape(cov)[1]
-    eps = 1e-6
     L = tf.linalg.cholesky(cov + tf.eye(D) * eps)  # K x D x D
     log_det_cov = 2. * tf.reduce_sum(tf.math.log(tf.linalg.diag_part(L)), 1)  # K
 
@@ -55,6 +55,7 @@ def gmm_energy(z: tf.Tensor,
                cov: tf.Tensor,
                L: tf.Tensor,
                log_det_cov: tf.Tensor,
+               recon_features_len:  int,
                return_mean: bool = True) \
         -> Tuple[tf.Tensor, tf.Tensor]:
     """
@@ -91,15 +92,19 @@ def gmm_energy(z: tf.Tensor,
 
     # rewrite sample energy in logsumexp format for numerical stability
     logits = tf.math.log(tf.expand_dims(phi, -1)) - .5 * (
-            tf.reduce_sum(tf.square(v), 1)
-            + tf.cast(D, tf.float32) * tf.math.log(2. * np.pi)
-            + tf.expand_dims(log_det_cov, -1))  # K x N
+                tf.reduce_sum(tf.square(v), 1)
+                + tf.cast(D, tf.float32) * tf.math.log(2. * np.pi)
+                + tf.expand_dims(log_det_cov, -1)
+            )  # K x N
     sample_energy = - tf.reduce_logsumexp(logits, axis=0)  # N
 
     if return_mean:
         sample_energy = tf.reduce_mean(sample_energy)
 
     # inverse sum of variances
-    cov_diag = tf.reduce_sum(tf.divide(1, tf.linalg.diag_part(cov)))
+    diag_part = tf.linalg.diag_part(cov)
+    if recon_features_len > 0:
+        diag_part = diag_part[..., :-recon_features_len]
 
+    cov_diag = tf.reduce_sum(tf.divide(1, diag_part))
     return sample_energy, cov_diag

@@ -22,6 +22,7 @@ class OutlierAEGMM(BaseDetector, FitMixin, ThresholdMixin):
                  gmm_density_net: tf.keras.Model = None,
                  n_gmm: int = None,
                  recon_features: Callable = eucl_cosim_features,
+                 recon_features_len: int = 2,
                  data_type: str = None
                  ) -> None:
         """
@@ -52,6 +53,7 @@ class OutlierAEGMM(BaseDetector, FitMixin, ThresholdMixin):
             logger.warning('No threshold level set. Need to infer threshold using `infer_threshold`.')
 
         self.threshold = threshold
+        self.recon_features_len = recon_features_len
 
         # check if model can be loaded, otherwise initialize AEGMM model
         if isinstance(aegmm, tf.keras.Model):
@@ -75,9 +77,11 @@ class OutlierAEGMM(BaseDetector, FitMixin, ThresholdMixin):
             loss_fn: tf.keras.losses = loss_aegmm,
             w_energy: float = .1,
             w_cov_diag: float = .005,
-            optimizer: tf.keras.optimizers = tf.keras.optimizers.Adam(learning_rate=1e-4),
+            optimizer: tf.keras.optimizers = tf.keras.optimizers.Adam(learning_rate=1e-3),
             epochs: int = 20,
             batch_size: int = 64,
+            recon_features_len: int = 2,
+            cholesky_eps: float = 1e-4,
             verbose: bool = True,
             log_metric: Tuple[str, "tf.keras.metrics"] = None,
             callbacks: tf.keras.callbacks = None,
@@ -117,15 +121,32 @@ class OutlierAEGMM(BaseDetector, FitMixin, ThresholdMixin):
                   'log_metric': log_metric,
                   'callbacks': callbacks,
                   'loss_fn_kwargs': {'w_energy': w_energy,
-                                     'w_cov_diag': w_cov_diag}
+                                     'w_cov_diag': w_cov_diag,
+                                     'cholesky_eps': cholesky_eps,
+                                     'recon_features_len': self.recon_features_len}
                   }
 
         # train
         trainer(*args, **kwargs)
 
         # set GMM parameters
-        x_recon, z, gamma = self.aegmm(X)
-        self.phi, self.mu, self.cov, self.L, self.log_det_cov = gmm_params(z, gamma)
+        num_iter = int(np.ceil(len(X) / batch_size))
+        z, gamma = [], []
+
+        for i in range(num_iter):
+            istart, iend = batch_size * i, min(batch_size * (i + 1), len(X))
+            _, iz, igamma = self.aegmm(X[istart:iend])
+
+            z.append(iz.numpy())
+            gamma.append(igamma.numpy())
+
+        z = np.concatenate(z, axis=0)
+        gamma = np.concatenate(gamma, axis=0)
+
+        with tf.device('cpu:0'):
+            self.phi, self.mu, self.cov, self.L, self.log_det_cov = gmm_params(z=z,
+                                                                               gamma=gamma,
+                                                                               eps=cholesky_eps)
 
     def infer_threshold(self,
                         X: np.ndarray,
@@ -167,7 +188,10 @@ class OutlierAEGMM(BaseDetector, FitMixin, ThresholdMixin):
         Array with outlier scores for each instance in the batch.
         """
         _, z, _ = predict_batch(X, self.aegmm, batch_size=batch_size)
-        energy, _ = gmm_energy(z, self.phi, self.mu, self.cov, self.L, self.log_det_cov, return_mean=False)
+        energy, _ = gmm_energy(z=z, phi=self.phi, mu=self.mu, cov=self.cov,
+                               L=self.L, log_det_cov=self.log_det_cov,
+                               recon_features_len=self.recon_features_len,
+                               return_mean=False)
         return energy.numpy()
 
     def predict(self,
